@@ -1,9 +1,22 @@
 import os
+import shutil
 from datetime import date, datetime
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
-EXCEL_PATH = os.path.join(os.path.dirname(__file__), "..", "Blinkit PO Tracker.xlsx")
+TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Blinkit PO Tracker.xlsx"))
+
+def get_live_path():
+    """
+    On Vercel, the filesystem is read-only. We use /tmp for writes.
+    This copies the template to /tmp on the first write/read if on Vercel.
+    """
+    if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+        live_path = os.path.join("/tmp", "Blinkit PO Tracker.xlsx")
+        if not os.path.exists(live_path):
+            shutil.copy2(TEMPLATE_PATH, live_path)
+        return live_path
+    return TEMPLATE_PATH
 
 # Maps our extracted keys → Excel column headers (exact header text in row 1)
 COLUMN_MAP = {
@@ -22,7 +35,7 @@ COLUMN_MAP = {
 
 
 def _load_workbook():
-    path = os.path.abspath(EXCEL_PATH)
+    path = get_live_path()
     if not os.path.exists(path):
         raise FileNotFoundError(f"Excel file not found: {path}")
     return openpyxl.load_workbook(path), path

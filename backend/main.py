@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from .extractor import extract_po_data
-from .excel_handler import append_rows, clear_sheet, get_sheet_preview
+from .excel_handler import append_rows, clear_sheet, get_sheet_preview, get_live_path
 
 app = FastAPI(title="Blinkit PO Extractor API")
 
@@ -89,7 +89,7 @@ def clear():
 @router.get("/download")
 def download():
     """Download the Excel tracker file."""
-    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Blinkit PO Tracker.xlsx"))
+    path = get_live_path()
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Excel file not found")
     return FileResponse(
