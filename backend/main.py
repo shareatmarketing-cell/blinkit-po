@@ -3,29 +3,24 @@ import shutil
 import tempfile
 from typing import List
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from extractor import extract_po_data
-from excel_handler import append_rows, clear_sheet, get_sheet_preview
+from .extractor import extract_po_data
+from .excel_handler import append_rows, clear_sheet, get_sheet_preview
 
 app = FastAPI(title="Blinkit PO Extractor API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Use a router to handle the /api prefix correctly for Vercel and local dev
+router = APIRouter(prefix="/api")
 
-
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.post("/upload")
+@router.post("/upload")
 async def upload_pdfs(files: List[UploadFile] = File(...)):
     """
     Accept one or more PDF files, extract PO data, append to Excel, and
@@ -81,7 +76,7 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
     return JSONResponse({"files": results, "excel": excel_info})
 
 
-@app.delete("/clear")
+@router.delete("/clear")
 def clear():
     """Wipe all data rows from Sheet1 (keeps header)."""
     try:
@@ -91,7 +86,7 @@ def clear():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/download")
+@router.get("/download")
 def download():
     """Download the Excel tracker file."""
     path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Blinkit PO Tracker.xlsx"))
@@ -104,10 +99,20 @@ def download():
     )
 
 
-@app.get("/preview")
+@router.get("/preview")
 def preview(max_rows: int = 50):
     """Return a preview of the current tracker data."""
     try:
         return get_sheet_preview(max_rows)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Include routes and middleware
+app.include_router(router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
