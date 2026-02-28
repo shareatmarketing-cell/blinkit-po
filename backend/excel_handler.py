@@ -89,7 +89,7 @@ def append_rows(rows: list[dict]) -> dict:
 
             # Format dates
             if isinstance(value, (date, datetime)):
-                cell.number_format = "DD-MMM-YYYY"
+                cell.number_format = "MM/DD/YYYY"
         next_row += 1
         written += 1
 

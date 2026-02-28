@@ -1,3 +1,12 @@
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T.*)?$/;
+function fmtCell(v) {
+  if (typeof v === "string" && ISO_DATE.test(v)) {
+    const [y, m, d] = v.slice(0, 10).split("-");
+    return `${m}/${d}/${y}`;
+  }
+  return v ?? "—";
+}
+
 const VISIBLE_COLS = [
   "PO NO", "PO DATE", "DELIVERY DATE", "VENDOR NAME",
   "SITE CODE ", "ARTICLE DESCRIPTION", "TOTAL PCS", "LANDING PRICE",
@@ -31,7 +40,7 @@ export default function PreviewTable({ data }) {
             {data.rows.map((row, ri) => (
               <tr key={ri}>
                 {visibleIdx.map((ci, i) => (
-                  <td key={i}>{row[ci] ?? "—"}</td>
+                  <td key={i}>{fmtCell(row[ci])}</td>
                 ))}
               </tr>
             ))}
