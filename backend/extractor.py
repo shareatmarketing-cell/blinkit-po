@@ -130,9 +130,9 @@ def extract_po_data(pdf_path: str) -> list[dict]:
 
         # Row with vendor name and PO number
         if "Vendor :" in cell0 or "Vendor:" in cell0:
-            vm = re.search(r"Vendor\s*:(.+?)(?:\nPAN|\nRegistered|$)", str(row[0]))
+            vm = re.search(r"Vendor\s*:(.+?)(?:\nPAN|\nRegistered|$)", str(row[0]), re.DOTALL)
             if vm:
-                vendor_name = vm.group(1).strip()
+                vendor_name = _clean(vm.group(1))
             if "P.O. Number" in meta_cell:
                 pm = re.search(r"P\.O\. Number\s*:(\S+)", meta_cell)
                 if pm:
@@ -186,8 +186,18 @@ def extract_po_data(pdf_path: str) -> list[dict]:
     margin_idx    = _find_col(col_map, "margin")
     tax_amt_idx   = _find_col(col_map, "taxamt")
 
+    # When the item table has many rows, Blinkit/Hyperpure PDFs continue it
+    # onto the next page as a separate table with no header row of its own
+    # (same column count, numbering picks up where page 1 left off). Splice
+    # those continuation rows in so multi-page POs don't silently lose items.
+    col_count = len(tbl[header_idx])
+    item_rows = list(tbl[header_idx + 1:])
+    for extra_tbl in tables[1:]:
+        if extra_tbl and len(extra_tbl[0]) == col_count:
+            item_rows.extend(extra_tbl)
+
     items = []
-    for row in tbl[header_idx + 1:]:
+    for row in item_rows:
         raw_num = str(row[0]).strip() if row[0] else ""
         if not raw_num.isdigit():
             break   # reached totals row
