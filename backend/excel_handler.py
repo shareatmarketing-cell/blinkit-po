@@ -1,22 +1,90 @@
 import os
-import shutil
+import re
 from datetime import date, datetime
 import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+import requests
 
 TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Blinkit PO Tracker.xlsx"))
+BLOB_PATHNAME = "Blinkit PO Tracker.xlsx"
+BLOB_UPLOAD_URL = f"https://blob.vercel-storage.com/{BLOB_PATHNAME}"
+BLOB_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _blob_token():
+    return os.environ.get("BLOB_READ_WRITE_TOKEN")
+
+
+def _blob_read_url(token: str) -> str:
+    # Token format: vercel_blob_rw_<storeId>_<secret> — the store id maps
+    # directly to the public read host, so no separate lookup call is needed.
+    m = re.match(r"vercel_blob_rw_([a-zA-Z0-9]+)_", token)
+    if not m:
+        raise RuntimeError("Could not parse Blob store id from BLOB_READ_WRITE_TOKEN")
+    return f"https://{m.group(1)}.public.blob.vercel-storage.com/{BLOB_PATHNAME}"
+
+
+def _download_blob(token: str):
+    resp = requests.get(_blob_read_url(token), headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.content
+
+
+def _upload_blob(token: str, data: bytes) -> None:
+    resp = requests.put(
+        BLOB_UPLOAD_URL,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "x-api-version": "7",
+            "x-content-type": BLOB_MIME,
+            "x-add-random-suffix": "0",
+            "x-allow-overwrite": "1",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+
 
 def get_live_path():
     """
-    On Vercel, the filesystem is read-only. We use /tmp for writes.
-    This copies the template to /tmp on the first write/read if on Vercel.
+    Vercel serverless functions are stateless across invocations -- /tmp is
+    NOT shared between requests (a different, freshly-initialized container
+    can serve any given request). Using /tmp alone as the "live" tracker
+    caused uploaded rows/dates to intermittently vanish depending which
+    container answered a later request.
+
+    The single source of truth is now a file in Vercel Blob storage, shared
+    by every container. Each call re-downloads the current copy into /tmp
+    purely so openpyxl has a local file handle to read/write.
     """
-    if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
-        live_path = os.path.join("/tmp", "Blinkit PO Tracker.xlsx")
-        if not os.path.exists(live_path):
-            shutil.copy2(TEMPLATE_PATH, live_path)
-        return live_path
-    return TEMPLATE_PATH
+    token = _blob_token()
+    if not token:
+        # Local dev / no Blob store connected yet: fall back to the bundled
+        # template on local disk (previous behaviour).
+        return TEMPLATE_PATH
+
+    local_path = os.path.join("/tmp", "Blinkit PO Tracker.xlsx")
+    data = _download_blob(token)
+    if data is None:
+        # First run ever: seed the Blob store from the bundled template.
+        with open(TEMPLATE_PATH, "rb") as f:
+            data = f.read()
+        _upload_blob(token, data)
+    with open(local_path, "wb") as f:
+        f.write(data)
+    return local_path
+
+
+def _save(wb, path) -> None:
+    """Save the workbook locally, then push it back to Blob storage (if
+    configured) so every other container sees the update immediately."""
+    wb.save(path)
+    token = _blob_token()
+    if token:
+        with open(path, "rb") as f:
+            _upload_blob(token, f.read())
 
 # Maps our extracted keys → Excel column headers (exact header text in row 1)
 COLUMN_MAP = {
@@ -93,7 +161,7 @@ def append_rows(rows: list[dict]) -> dict:
         next_row += 1
         written += 1
 
-    wb.save(path)
+    _save(wb, path)
     return {"appended": written, "path": path}
 
 
@@ -110,7 +178,7 @@ def clear_sheet() -> dict:
             ws.delete_rows(row)
             rows_deleted += 1
 
-    wb.save(path)
+    _save(wb, path)
     return {"deleted": rows_deleted, "path": path}
 
 
