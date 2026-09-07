@@ -16,11 +16,13 @@ def _blob_token():
 
 def _blob_read_url(token: str) -> str:
     # Token format: vercel_blob_rw_<storeId>_<secret> — the store id maps
-    # directly to the public read host, so no separate lookup call is needed.
+    # directly to the read host, so no separate lookup call is needed. The
+    # store here is private (created via the dashboard default), so reads go
+    # through the .private. host and require the Authorization header.
     m = re.match(r"vercel_blob_rw_([a-zA-Z0-9]+)_", token)
     if not m:
         raise RuntimeError("Could not parse Blob store id from BLOB_READ_WRITE_TOKEN")
-    return f"https://{m.group(1)}.public.blob.vercel-storage.com/{BLOB_PATHNAME}"
+    return f"https://{m.group(1)}.private.blob.vercel-storage.com/{BLOB_PATHNAME}"
 
 
 def _download_blob(token: str):
@@ -42,6 +44,7 @@ def _upload_blob(token: str, data: bytes) -> None:
             "x-content-type": BLOB_MIME,
             "x-add-random-suffix": "0",
             "x-allow-overwrite": "1",
+            "x-access": "private",
         },
         timeout=30,
     )
