@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import date, datetime
 import openpyxl
 import requests
@@ -15,27 +16,32 @@ def _blob_token():
     return os.environ.get("BLOB_READ_WRITE_TOKEN")
 
 
-def _download_blob(token: str):
+def _download_blob(token: str, retries: int = 6):
     # Private-store blobs don't have a guessable public host/URL -- resolve
     # the current download URL via the "head" lookup (by pathname) first,
     # matching what @vercel/blob's head() does, then fetch that URL.
-    head_resp = requests.get(
-        BLOB_UPLOAD_API_URL,
-        params={"url": BLOB_PATHNAME},
-        headers={"Authorization": f"Bearer {token}", "x-api-version": "12"},
-        timeout=15,
-    )
-    if head_resp.status_code == 404:
-        return None
-    if not head_resp.ok:
-        raise RuntimeError(f"Blob head failed ({head_resp.status_code}): {head_resp.text}")
-
-    download_url = head_resp.json()["downloadUrl"]
-    resp = requests.get(download_url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
-    if resp.status_code == 404:
-        return None
-    resp.raise_for_status()
-    return resp.content
+    #
+    # A 404 here is retried rather than trusted immediately: Blob writes are
+    # not instantly visible to reads (eventual consistency), so a read that
+    # lands right after a write can spuriously 404. Treating that as "the
+    # file has never existed" and reseeding from the empty template would
+    # silently overwrite real data -- which is exactly what happened before
+    # this retry was added.
+    for attempt in range(retries):
+        head_resp = requests.get(
+            BLOB_UPLOAD_API_URL,
+            params={"url": BLOB_PATHNAME},
+            headers={"Authorization": f"Bearer {token}", "x-api-version": "12"},
+            timeout=15,
+        )
+        if head_resp.ok:
+            download_url = head_resp.json()["downloadUrl"]
+            resp = requests.get(download_url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+            if resp.ok:
+                return resp.content
+        if attempt < retries - 1:
+            time.sleep(0.5)
+    return None
 
 
 def _upload_blob(token: str, data: bytes) -> None:
