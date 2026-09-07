@@ -6,7 +6,9 @@ import requests
 
 TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Blinkit PO Tracker.xlsx"))
 BLOB_PATHNAME = "Blinkit PO Tracker.xlsx"
-BLOB_UPLOAD_URL = f"https://blob.vercel-storage.com/{BLOB_PATHNAME}"
+# The upload API lives at vercel.com, not the blob.vercel-storage.com read
+# host -- pathname is passed as a query param, not a path segment.
+BLOB_UPLOAD_API_URL = "https://vercel.com/api/blob"
 BLOB_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -35,16 +37,16 @@ def _download_blob(token: str):
 
 def _upload_blob(token: str, data: bytes) -> None:
     resp = requests.put(
-        BLOB_UPLOAD_URL,
+        BLOB_UPLOAD_API_URL,
+        params={"pathname": BLOB_PATHNAME},
         data=data,
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": BLOB_MIME,
-            "x-api-version": "7",
+            "x-api-version": "12",
             "x-content-type": BLOB_MIME,
             "x-add-random-suffix": "0",
             "x-allow-overwrite": "1",
-            "x-access": "private",
+            "x-vercel-blob-access": "private",
         },
         timeout=30,
     )
