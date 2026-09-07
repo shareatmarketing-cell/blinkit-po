@@ -37,6 +37,7 @@ def _upload_blob(token: str, data: bytes) -> None:
         data=data,
         headers={
             "Authorization": f"Bearer {token}",
+            "Content-Type": BLOB_MIME,
             "x-api-version": "7",
             "x-content-type": BLOB_MIME,
             "x-add-random-suffix": "0",
@@ -44,7 +45,8 @@ def _upload_blob(token: str, data: bytes) -> None:
         },
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"Blob upload failed ({resp.status_code}): {resp.text}")
 
 
 def get_live_path():
