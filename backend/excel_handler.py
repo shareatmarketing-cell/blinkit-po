@@ -1,5 +1,4 @@
 import os
-import re
 from datetime import date, datetime
 import openpyxl
 import requests
@@ -16,19 +15,23 @@ def _blob_token():
     return os.environ.get("BLOB_READ_WRITE_TOKEN")
 
 
-def _blob_read_url(token: str) -> str:
-    # Token format: vercel_blob_rw_<storeId>_<secret> — the store id maps
-    # directly to the read host, so no separate lookup call is needed. The
-    # store here is private (created via the dashboard default), so reads go
-    # through the .private. host and require the Authorization header.
-    m = re.match(r"vercel_blob_rw_([a-zA-Z0-9]+)_", token)
-    if not m:
-        raise RuntimeError("Could not parse Blob store id from BLOB_READ_WRITE_TOKEN")
-    return f"https://{m.group(1)}.private.blob.vercel-storage.com/{BLOB_PATHNAME}"
-
-
 def _download_blob(token: str):
-    resp = requests.get(_blob_read_url(token), headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    # Private-store blobs don't have a guessable public host/URL -- resolve
+    # the current download URL via the "head" lookup (by pathname) first,
+    # matching what @vercel/blob's head() does, then fetch that URL.
+    head_resp = requests.get(
+        BLOB_UPLOAD_API_URL,
+        params={"url": BLOB_PATHNAME},
+        headers={"Authorization": f"Bearer {token}", "x-api-version": "12"},
+        timeout=15,
+    )
+    if head_resp.status_code == 404:
+        return None
+    if not head_resp.ok:
+        raise RuntimeError(f"Blob head failed ({head_resp.status_code}): {head_resp.text}")
+
+    download_url = head_resp.json()["downloadUrl"]
+    resp = requests.get(download_url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
