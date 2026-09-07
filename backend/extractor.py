@@ -150,11 +150,16 @@ def extract_po_data(pdf_path: str) -> list[dict]:
                     except ValueError:
                         vendor_code = vm2.group(1)
 
-        # Row with PO expiry date
-        if "PO expiry date" in meta_cell:
-            em = re.search(r"PO expiry date\s*:(.+?)(?:PO delivery|GST|$)", meta_cell)
-            if em:
-                delivery_date = _parse_date(em.group(1).strip())
+        # Row with PO delivery date.
+        # Note: in the source PDF, the "date" part of the "PO delivery date"
+        # label wraps onto its own line *after* the value (e.g.
+        # "PO delivery :Aug. 25, 2026, 11:59 p.m.\ndate"), so the value sits
+        # between "PO delivery :" and the trailing "date" token rather than
+        # before it like the other fields.
+        if "PO delivery" in meta_cell:
+            dm3 = re.search(r"PO delivery\s*:(.+?)\s*date\b", meta_cell)
+            if dm3:
+                delivery_date = _parse_date(dm3.group(1).strip())
 
     # ── Find the item-table header row and locate columns dynamically ──────────
     # The column-header row contains "#" in position 0
