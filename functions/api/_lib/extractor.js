@@ -21,26 +21,51 @@ const LEFT_RIGHT_SPLIT_X = 250;
 const ROW_GROUP_GAP = 12; // px gap that separates the header block from row 1
 const COL_MATCH_TOLERANCE = 12; // px tolerance when assigning a text run to a column band
 
-function parseDate(raw) {
+export function parseDate(raw) {
   if (!raw) return null;
-  let s = raw.trim();
-  s = s.replace(/([A-Za-z]{3})\./g, "$1"); // "Feb." -> "Feb"
-  const parts = s.split(",").map((p) => p.trim());
-  if (parts.length >= 2) s = `${parts[0]}, ${parts[1]}`;
+  const s = String(raw).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
 
   const months = {
     jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
-    may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7, sep: 8, september: 8,
+    may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7,
+    sep: 8, sept: 8, september: 8,
     oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
   };
-  const m = s.match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/);
-  if (!m) return null;
-  const month = months[m[1].toLowerCase()];
-  if (month === undefined) return null;
-  const day = parseInt(m[2], 10);
-  const year = parseInt(m[3], 10);
+
+  // Hyperpure uses month names with varying abbreviations (notably "Sept.")
+  // and may append a time after the year. Match only the date portion.
+  const textDate = s.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(\d{4})\b/i);
+  let year;
+  let month;
+  let day;
+  if (textDate) {
+    month = months[textDate[1].toLowerCase()];
+    if (month === undefined) return null;
+    day = parseInt(textDate[2], 10);
+    year = parseInt(textDate[3], 10);
+  } else {
+    const ymd = s.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+    const dmy = s.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+    if (ymd) {
+      year = parseInt(ymd[1], 10);
+      month = parseInt(ymd[2], 10) - 1;
+      day = parseInt(ymd[3], 10);
+    } else if (dmy) {
+      day = parseInt(dmy[1], 10);
+      month = parseInt(dmy[2], 10) - 1;
+      year = parseInt(dmy[3], 10);
+    } else {
+      return null;
+    }
+  }
+
   const d = new Date(Date.UTC(year, month, day));
-  if (Number.isNaN(d.getTime())) return null;
+  if (
+    Number.isNaN(d.getTime()) ||
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month ||
+    d.getUTCDate() !== day
+  ) return null;
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
@@ -226,6 +251,48 @@ function findFooterCutoffY(items) {
   return cutoff;
 }
 
+function extractSummary(pages) {
+  const text = pages
+    .flat()
+    .map((item) => item.str)
+    .join(" ")
+    .replace(/\s+/g, " ");
+  const quantity = text.match(/Total\s+Quantity\s*:\s*([\d,]+)/i);
+  const itemCount = text.match(/Total\s+Items\s*:\s*([\d,]+)/i);
+  const amount = text.match(/Total\s+Amount\s*:?\s*([\d,]+(?:\.\d+)?)/i);
+  if (!quantity || !itemCount || !amount) return null;
+  return {
+    quantity: num(quantity[1], "int"),
+    itemCount: num(itemCount[1], "int"),
+    amount: num(amount[1]),
+  };
+}
+
+function validateItems(items, summary) {
+  if (!items.length) throw new Error("Could not extract any PO item rows from PDF");
+  for (let index = 0; index < items.length; index++) {
+    const row = items[index];
+    const label = `PO item ${index + 1}`;
+    if (!row["ARTICLE DESCRIPTION"]) throw new Error(`${label} is missing its description`);
+    if (!Number.isFinite(row["TOTAL PCS"]) || row["TOTAL PCS"] <= 0) throw new Error(`${label} has an invalid quantity`);
+    if (!Number.isFinite(row["LANDING PRICE"]) || row["LANDING PRICE"] < 0) throw new Error(`${label} has an invalid landing price`);
+    if (!Number.isFinite(row["TOTAL BASIC PO VALUE WITH TAX"]) || row["TOTAL BASIC PO VALUE WITH TAX"] < 0) {
+      throw new Error(`${label} has an invalid total amount`);
+    }
+    const calculated = row["TOTAL PCS"] * row["LANDING PRICE"];
+    if (Math.abs(calculated - row["TOTAL BASIC PO VALUE WITH TAX"]) > 0.011) {
+      throw new Error(`${label} total does not match quantity multiplied by landing price`);
+    }
+  }
+
+  if (!summary) throw new Error("Could not extract PO summary totals for validation");
+  const quantity = items.reduce((sum, row) => sum + row["TOTAL PCS"], 0);
+  const amount = items.reduce((sum, row) => sum + row["TOTAL BASIC PO VALUE WITH TAX"], 0);
+  if (items.length !== summary.itemCount) throw new Error("Extracted item count does not match the PO summary");
+  if (quantity !== summary.quantity) throw new Error("Extracted quantity does not match the PO summary");
+  if (Math.abs(amount - summary.amount) > 0.011) throw new Error("Extracted amount does not match the PO summary");
+}
+
 /** Extract item rows from one page given the column bands (derived from page 1's header). */
 function extractItemRows(items, columns, col0X, belowY) {
   const footerY = findFooterCutoffY(items);
@@ -307,9 +374,18 @@ export async function extractPoData(pdfBytes) {
   const chain = "Zomato Hyperpure Private Limited";
   const meta = extractMetadata(pages[0]);
 
+  // Dates are mandatory tracker fields. Do not silently append rows with blank
+  // dates when Hyperpure changes the PDF layout or date spelling again.
+  const missingDates = [];
+  if (!meta.poDate) missingDates.push("PO date");
+  if (!meta.deliveryDate) missingDates.push("delivery date");
+  if (missingDates.length) {
+    throw new Error(`Could not extract required ${missingDates.join(" and ")} from PDF`);
+  }
+
   const colInfo = findColumns(pages[0]);
   if (!colInfo) {
-    return [makeRow(chain, meta.siteCode, meta.vendorCode, meta.vendorName, meta.poNumber, meta.poDate, meta.deliveryDate, "", null, null, null)];
+    throw new Error("Could not locate the PO item table");
   }
 
   const { columns, headerTopY, row1Y } = colInfo;
@@ -354,9 +430,7 @@ export async function extractPoData(pdfBytes) {
     items.push(makeRow(chain, meta.siteCode, meta.vendorCode, meta.vendorName, meta.poNumber, meta.poDate, meta.deliveryDate, description, qty, landing, total, extras));
   }
 
-  if (!items.length) {
-    items.push(makeRow(chain, meta.siteCode, meta.vendorCode, meta.vendorName, meta.poNumber, meta.poDate, meta.deliveryDate, "", null, null, null));
-  }
+  validateItems(items, extractSummary(pages));
 
   return items;
 }

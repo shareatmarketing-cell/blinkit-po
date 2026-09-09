@@ -65,6 +65,25 @@ function rowHasValue(ws, rowIdx0, range) {
   return false;
 }
 
+function excelDateSerial(value) {
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) throw new Error(`Invalid extracted date: ${value}`);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const utc = Date.UTC(year, month - 1, day);
+  const date = new Date(utc);
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) throw new Error(`Invalid extracted date: ${value}`);
+
+  // Write the canonical Excel serial instead of a JavaScript Date object.
+  // This behaves consistently in both Node and the Cloudflare Workers runtime.
+  return utc / 86400000 + 25569;
+}
+
 export async function appendRows(bucket, rows) {
   const wb = await loadWorkbook(bucket);
   const ws = wb.Sheets[SHEET_NAME];
@@ -96,7 +115,7 @@ export async function appendRows(bucket, rows) {
       const addr = XLSX.utils.encode_cell({ r: nextRow0, c: colIdx1 - 1 });
 
       if (key === "PO DATE" || key === "DELIVERY DATE") {
-        ws[addr] = { t: "d", v: new Date(value), z: "MM/DD/YYYY" };
+        ws[addr] = { t: "n", v: excelDateSerial(value), z: "MM/DD/YYYY" };
       } else if (typeof value === "number") {
         ws[addr] = { t: "n", v: value };
       } else {
