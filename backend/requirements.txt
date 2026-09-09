@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-pdfplumber
-openpyxl
-python-multipart
-requests

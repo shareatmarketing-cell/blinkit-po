@@ -1,0 +1,12 @@
+{
+  "name": "blinkit-po-tracker",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "pages_build_output_dir": "frontend/dist",
+  "r2_buckets": [
+    {
+      "binding": "EXCEL_BUCKET",
+      "bucket_name": "blinkit-po-tracker"
+    }
+  ]
+}
