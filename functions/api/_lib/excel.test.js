@@ -26,7 +26,7 @@ function memoryBucket(initialBytes) {
   };
 }
 
-test("persists extracted PO and delivery dates in the downloadable workbook", async () => {
+test("persists extracted PO and expiry dates in the downloadable workbook", async () => {
   const template = await readFile(new URL("../../../Blinkit PO Tracker.xlsx", import.meta.url));
   const pdf = await readFile(new URL("../../../6478810007248.pdf", import.meta.url));
   const rows = await extractPoData(new Uint8Array(pdf));
@@ -38,7 +38,7 @@ test("persists extracted PO and delivery dates in the downloadable workbook", as
   assert.equal(preview.rows.length, 1);
   assert.equal(preview.rows[0][6], 6478810007248);
   assert.equal(preview.rows[0][7], "2026-02-17");
-  assert.equal(preview.rows[0][8], "2026-02-18");
+  assert.equal(preview.rows[0][8], "2026-02-27");
 
   const saved = XLSX.read(bucket.bytes(), { type: "array", cellNF: true });
   assert.equal(saved.Sheets.Sheet1.H2.z, "MM/DD/YYYY");
@@ -60,7 +60,7 @@ test("round-trips dates from every real PDF through the workbook", {
     const rows = await extractPoData(new Uint8Array(pdf));
     expectedByPo.set(String(rows[0]["PO NO"]), {
       poDate: rows[0]["PO DATE"],
-      deliveryDate: rows[0]["DELIVERY DATE"],
+      expiryDate: rows[0]["DELIVERY DATE"],
       rowCount: rows.length,
     });
     await appendRows(bucket, rows);
@@ -72,6 +72,6 @@ test("round-trips dates from every real PDF through the workbook", {
     const expected = expectedByPo.get(String(row[6]));
     assert.ok(expected, `unexpected PO ${row[6]}`);
     assert.equal(row[7], expected.poDate, `PO ${row[6]}: persisted PO date`);
-    assert.equal(row[8], expected.deliveryDate, `PO ${row[6]}: persisted delivery date`);
+    assert.equal(row[8], expected.expiryDate, `PO ${row[6]}: persisted PO expiry date`);
   }
 });

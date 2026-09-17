@@ -24,7 +24,7 @@ export async function onRequestPost({ request, env }) {
         rows_extracted: rows.length,
         po_number: rows[0]?.["PO NO"] ?? null,
         po_date: rows[0]?.["PO DATE"] ?? null,
-        delivery_date: rows[0]?.["DELIVERY DATE"] ?? null,
+        po_expiry_date: rows[0]?.["DELIVERY DATE"] ?? null,
         vendor: rows[0]?.["VENDOR NAME"] ?? null,
         items: rows.map((r) => ({
           description: r["ARTICLE DESCRIPTION"],

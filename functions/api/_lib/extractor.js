@@ -132,7 +132,7 @@ function extractMetadata(items) {
     vendorCode: null,
     poNumber: null,
     poDate: null,
-    deliveryDate: null,
+    poExpiryDate: null,
   };
 
   for (const { runs } of lines) {
@@ -166,8 +166,8 @@ function extractMetadata(items) {
         meta.poNumber = n === null ? value : n;
       } else if (labelLc === "date") {
         meta.poDate = parseDate(value);
-      } else if (labelLc.includes("po delivery")) {
-        meta.deliveryDate = parseDate(value);
+      } else if (labelLc.includes("po expiry")) {
+        meta.poExpiryDate = parseDate(value);
       }
     }
   }
@@ -328,7 +328,7 @@ function extractItemRows(items, columns, col0X, belowY) {
   return rows;
 }
 
-function makeRow(chain, siteCode, vendorCode, vendorName, poNumber, poDate, deliveryDate, description, qty, landingPrice, totalAmt, extras) {
+function makeRow(chain, siteCode, vendorCode, vendorName, poNumber, poDate, poExpiryDate, description, qty, landingPrice, totalAmt, extras) {
   return {
     "CHAINS": chain,
     "SITE CODE": siteCode,
@@ -336,7 +336,9 @@ function makeRow(chain, siteCode, vendorCode, vendorName, poNumber, poDate, deli
     "VENDOR NAME": vendorName,
     "PO NO": poNumber,
     "PO DATE": poDate,
-    "DELIVERY DATE": deliveryDate,
+    // The tracker keeps its historical column name, but the requested source
+    // field is the PDF's PO expiry date rather than PO delivery date.
+    "DELIVERY DATE": poExpiryDate,
     "ARTICLE DESCRIPTION": description,
     "TOTAL PCS": qty,
     "LANDING PRICE": landingPrice,
@@ -378,7 +380,7 @@ export async function extractPoData(pdfBytes) {
   // dates when Hyperpure changes the PDF layout or date spelling again.
   const missingDates = [];
   if (!meta.poDate) missingDates.push("PO date");
-  if (!meta.deliveryDate) missingDates.push("delivery date");
+  if (!meta.poExpiryDate) missingDates.push("PO expiry date");
   if (missingDates.length) {
     throw new Error(`Could not extract required ${missingDates.join(" and ")} from PDF`);
   }
@@ -427,7 +429,7 @@ export async function extractPoData(pdfBytes) {
       "TAX AMT": num(row.cellText(taxAmtCol?.key)),
     };
 
-    items.push(makeRow(chain, meta.siteCode, meta.vendorCode, meta.vendorName, meta.poNumber, meta.poDate, meta.deliveryDate, description, qty, landing, total, extras));
+    items.push(makeRow(chain, meta.siteCode, meta.vendorCode, meta.vendorName, meta.poNumber, meta.poDate, meta.poExpiryDate, description, qty, landing, total, extras));
   }
 
   validateItems(items, extractSummary(pages));
