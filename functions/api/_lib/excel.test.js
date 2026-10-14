@@ -75,3 +75,48 @@ test("round-trips dates from every real PDF through the workbook", {
     assert.equal(row[8], expected.expiryDate, `PO ${row[6]}: persisted PO expiry date`);
   }
 });
+
+test("replaceRows resets old rows and leaves only new rows", async () => {
+  const mapBucket = new Map();
+  const bucket = {
+    async get(key) {
+      const data = mapBucket.get(key);
+      if (!data) return null;
+      return { arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) };
+    },
+    async put(key, bytes) {
+      mapBucket.set(key, new Uint8Array(bytes));
+    },
+    async delete(key) {
+      mapBucket.delete(key);
+    },
+  };
+
+  const pdf = await readFile(new URL("../../../6478810007248.pdf", import.meta.url));
+  const rows = await extractPoData(new Uint8Array(pdf));
+
+  // Initial upload of rows
+  await appendRows(bucket, rows, "test-session.xlsx");
+  let preview = await getSheetPreview(bucket, 10, "test-session.xlsx");
+  assert.equal(preview.rows.length, 1);
+
+  // New batch replaces old batch
+  const newRow = [{ ...rows[0], "PO NO": 9999999999999, "ARTICLE DESCRIPTION": "New Item Only" }];
+  const { replaceRows, clearSheet } = await import("./excel.js");
+  await replaceRows(bucket, newRow, "test-session.xlsx");
+
+  preview = await getSheetPreview(bucket, 10, "test-session.xlsx");
+  assert.equal(preview.rows.length, 1);
+  assert.equal(preview.rows[0][6], 9999999999999);
+  assert.equal(preview.rows[0][10], "New Item Only");
+
+  // Clear sheet deletes object from R2 bucket
+  await clearSheet(bucket, "test-session.xlsx");
+  assert.equal(mapBucket.has("test-session.xlsx"), false);
+
+  // Previewing empty bucket returns 0 rows without error
+  const emptyPreview = await getSheetPreview(bucket, 10, "test-session.xlsx");
+  assert.equal(emptyPreview.rows.length, 0);
+  assert.ok(emptyPreview.headers.length > 0);
+});
+

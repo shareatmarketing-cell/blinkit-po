@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import UploadZone from "./components/UploadZone";
 import ConfirmModal from "./components/ConfirmModal";
 import PreviewTable from "./components/PreviewTable";
-import { uploadPDFs, clearSheet, fetchPreview, downloadExcel } from "./api";
+import { uploadInBatches, clearSheet, fetchPreview, downloadExcel, cleanupSession } from "./api";
+import { unpackFiles } from "./utils/zip";
 
 function Toast({ message, type, onClose }) {
   useEffect(() => {
@@ -21,6 +22,7 @@ export default function App() {
   const [files, setFiles] = useState([]);
   const [results, setResults] = useState({});
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -28,7 +30,7 @@ export default function App() {
   const [preview, setPreview] = useState(null);
 
   const addToast = (message, type = "success") => {
-    const id = Date.now();
+    const id = Date.now() + Math.random();
     setToasts((t) => [...t, { id, message, type }]);
   };
   const removeToast = (id) => setToasts((t) => t.filter((x) => x.id !== id));
@@ -41,11 +43,49 @@ export default function App() {
 
   useEffect(() => { loadPreview(); }, [loadPreview]);
 
-  function handleFilesSelected(newFiles) {
-    setFiles((prev) => {
-      const existing = new Set(prev.map((f) => f.name));
-      return [...prev, ...newFiles.filter((f) => !existing.has(f.name))];
-    });
+  // Clean up temporary R2 storage when the tab or window is closed
+  useEffect(() => {
+    const handleUnload = () => {
+      cleanupSession();
+    };
+    window.addEventListener("pagehide", handleUnload);
+    window.addEventListener("beforeunload", handleUnload);
+    return () => {
+      window.removeEventListener("pagehide", handleUnload);
+      window.removeEventListener("beforeunload", handleUnload);
+    };
+  }, []);
+
+  const hasFiles = files.length > 0;
+  const allDone = hasFiles && files.every((f) => results[f.name]);
+
+  async function handleFilesSelected(newFiles) {
+    try {
+      const { files: unpacked, unpackedZipCount, totalPdfsFromZips } = await unpackFiles(newFiles);
+      if (unpackedZipCount > 0) {
+        addToast(`Extracted ${totalPdfsFromZips} PDF${totalPdfsFromZips !== 1 ? "s" : ""} from ZIP archive.`, "success");
+      }
+
+      // If the previous batch was already completed, replace with the newly selected files
+      if (allDone) {
+        setFiles(unpacked);
+        setResults({});
+        return;
+      }
+
+      setFiles((prev) => {
+        const existing = new Set(prev.map((f) => f.name));
+        return [...prev, ...unpacked.filter((f) => !existing.has(f.name))];
+      });
+    } catch (err) {
+      addToast(`Error reading files: ${err.message}`, "error");
+    }
+  }
+
+  function resetBatch() {
+    setFiles([]);
+    setResults({});
+    setUploadProgress(null);
   }
 
   function removeFile(name) {
@@ -56,21 +96,43 @@ export default function App() {
   async function handleUpload() {
     if (!files.length || uploading) return;
     setUploading(true);
+    setUploadProgress({
+      processed: 0,
+      total: files.length,
+      currentBatch: 1,
+      totalBatches: Math.ceil(files.length / 4),
+    });
+
     try {
-      const data = await uploadPDFs(files);
+      const data = await uploadInBatches(files, {
+        batchSize: 4,
+        onProgress: (p) => {
+          setUploadProgress(p);
+          if (p.latestFiles) {
+            setResults((prev) => {
+              const updated = { ...prev };
+              for (const r of p.latestFiles) {
+                updated[r.file] = r;
+              }
+              return updated;
+            });
+          }
+        },
+      });
+
       const map = {};
       for (const r of data.files) map[r.file] = r;
       setResults(map);
       const ok = data.files.filter((r) => r.status === "ok").length;
       const fail = data.files.filter((r) => r.status === "error").length;
-      if (ok) addToast(`${ok} PO${ok !== 1 ? "s" : ""} appended to tracker.`, "success");
+      if (ok) addToast(`${ok} PO${ok !== 1 ? "s" : ""} processed into fresh tracker.`, "success");
       if (fail) addToast(`${fail} file${fail !== 1 ? "s" : ""} failed to parse.`, "error");
-      if (data.excel?.excel_error) addToast(`Excel: ${data.excel.excel_error}`, "error");
       await loadPreview();
     } catch (e) {
       addToast(`Upload error: ${e.message}`, "error");
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -78,7 +140,14 @@ export default function App() {
     if (downloading) return;
     setDownloading(true);
     try {
-      await downloadExcel();
+      // Gather any raw_rows extracted in this session for fallback
+      const fallbackRows = [];
+      for (const res of Object.values(results)) {
+        if (res.raw_rows && Array.isArray(res.raw_rows)) {
+          fallbackRows.push(...res.raw_rows);
+        }
+      }
+      await downloadExcel(fallbackRows);
     } catch (e) {
       addToast(`Download failed: ${e.message}`, "error");
     } finally {
@@ -90,10 +159,11 @@ export default function App() {
     setShowModal(false);
     setClearing(true);
     try {
-      const data = await clearSheet();
-      addToast(`Sheet cleared — ${data.rows_deleted} row${data.rows_deleted !== 1 ? "s" : ""} removed.`, "success");
+      await clearSheet();
+      addToast("Temporary data cleared from tracker storage.", "success");
       setFiles([]);
       setResults({});
+      setUploadProgress(null);
       await loadPreview();
     } catch (e) {
       addToast(`Clear failed: ${e.message}`, "error");
@@ -101,9 +171,6 @@ export default function App() {
       setClearing(false);
     }
   }
-
-  const hasFiles = files.length > 0;
-  const allDone = hasFiles && files.every((f) => results[f.name]);
 
   return (
     <div className="app">
@@ -156,8 +223,8 @@ export default function App() {
               <div className="file-list-header">
                 <span>{files.length} file{files.length !== 1 ? "s" : ""} selected</span>
                 {!uploading && (
-                  <button className="btn-ghost" onClick={() => { setFiles([]); setResults({}); }}>
-                    Clear all
+                  <button className="btn-ghost" onClick={resetBatch}>
+                    {allDone ? "Start new batch" : "Clear all"}
                   </button>
                 )}
               </div>
@@ -199,7 +266,31 @@ export default function App() {
                 })}
               </div>
 
-              <div className="upload-footer">
+              {uploadProgress && (
+                <div className="upload-progress-container" style={{ margin: "1rem 0" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.4rem", fontSize: "0.85rem", color: "#64748b" }}>
+                    <span>Processing batch {uploadProgress.currentBatch} of {uploadProgress.totalBatches}…</span>
+                    <span>{Math.min(uploadProgress.processed, uploadProgress.total)} / {uploadProgress.total} ({Math.round((Math.min(uploadProgress.processed, uploadProgress.total) / uploadProgress.total) * 100)}%)</span>
+                  </div>
+                  <div style={{ width: "100%", height: "6px", backgroundColor: "#e2e8f0", borderRadius: "999px", overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${Math.round((Math.min(uploadProgress.processed, uploadProgress.total) / uploadProgress.total) * 100)}%`,
+                        height: "100%",
+                        backgroundColor: "#10b981",
+                        transition: "width 0.3s ease",
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="upload-footer" style={{ display: "flex", gap: "10px" }}>
+                {allDone && (
+                  <button className="btn-ghost" onClick={resetBatch} style={{ padding: "0.6rem 1.2rem" }}>
+                    + Upload New POs
+                  </button>
+                )}
                 <button
                   className={`btn-primary ${uploading ? "loading" : ""}`}
                   onClick={handleUpload}
@@ -208,13 +299,13 @@ export default function App() {
                   {uploading ? (
                     <><span className="spinner" /> Processing…</>
                   ) : allDone ? (
-                    <>Done ✓</>
+                    <>Batch Processed ✓</>
                   ) : (
                     <>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" strokeLinecap="round" strokeLinejoin="round"/>
                       </svg>
-                      Extract &amp; Append to Tracker
+                      Extract &amp; Process POs
                     </>
                   )}
                 </button>

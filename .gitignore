@@ -10,6 +10,7 @@ dist/
 build/
 .next/
 out/
+_worker.bundle/
 
 # Environment Variables
 .env

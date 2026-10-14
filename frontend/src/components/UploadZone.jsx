@@ -8,9 +8,10 @@ export default function UploadZone({ onFilesSelected, disabled }) {
     e.preventDefault();
     setDragging(false);
     if (disabled) return;
-    const files = Array.from(e.dataTransfer.files).filter((f) =>
-      f.name.toLowerCase().endsWith(".pdf")
-    );
+    const files = Array.from(e.dataTransfer.files).filter((f) => {
+      const n = f.name.toLowerCase();
+      return n.endsWith(".pdf") || n.endsWith(".zip");
+    });
     if (files.length) onFilesSelected(files);
   }
 
@@ -31,7 +32,7 @@ export default function UploadZone({ onFilesSelected, disabled }) {
       <input
         ref={inputRef}
         type="file"
-        accept=".pdf"
+        accept=".pdf,.zip"
         multiple
         style={{ display: "none" }}
         onChange={handleChange}
@@ -41,8 +42,8 @@ export default function UploadZone({ onFilesSelected, disabled }) {
           <path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       </div>
-      <p className="upload-title">Drop PO PDFs here</p>
-      <p className="upload-sub">or click to browse · multiple files supported</p>
+      <p className="upload-title">Drop PO PDFs or ZIP archive here</p>
+      <p className="upload-sub">or click to browse · multiple PDFs or .zip archives supported</p>
     </div>
   );
 }

@@ -1,11 +1,10 @@
-// Excel tracker read/write, backed by Cloudflare R2 instead of Vercel Blob.
-// Ported from excel_handler.py. R2 objects are strongly consistent for a
-// single bucket, so (unlike the original Vercel Blob code) no retry-on-404
-// dance is needed -- a read always sees the most recent write.
+// Excel tracker read/write, backed by Cloudflare R2.
+// Supports session isolation, automatic template fallback, and clean temporary storage.
 
 import * as XLSX from "xlsx";
+import { getTemplateWorkbook, getTemplateBytes } from "./template.js";
 
-const OBJECT_KEY = "Blinkit-PO-Tracker.xlsx";
+export const DEFAULT_OBJECT_KEY = "Blinkit-PO-Tracker.xlsx";
 const SHEET_NAME = "Sheet1";
 
 // Maps our extracted keys -> Excel column headers (exact header text in row 1).
@@ -23,21 +22,48 @@ const COLUMN_MAP = {
   "TOTAL BASIC PO VALUE WITH TAX": "TOTAL BASIC PO VALUE WITH TAX",
 };
 
-async function loadWorkbook(bucket) {
-  const obj = await bucket.get(OBJECT_KEY);
-  if (!obj) throw new Error("Excel file not found in R2");
-  const buf = await obj.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array", cellDates: true });
-  return wb;
+export function resolveObjectKey(sessionId) {
+  if (!sessionId) return DEFAULT_OBJECT_KEY;
+  const safeSession = String(sessionId).trim().replace(/[^a-zA-Z0-9_-]/g, "");
+  return safeSession ? `sessions/${safeSession}/Blinkit-PO-Tracker.xlsx` : DEFAULT_OBJECT_KEY;
 }
 
-async function saveWorkbook(bucket, wb) {
+const memoryStore = new Map();
+
+async function loadWorkbook(bucket, objectKey = DEFAULT_OBJECT_KEY) {
+  if (bucket && typeof bucket.get === "function") {
+    try {
+      const obj = await bucket.get(objectKey);
+      if (obj) {
+        const buf = await obj.arrayBuffer();
+        return XLSX.read(buf, { type: "array", cellDates: true });
+      }
+    } catch (e) {
+      console.warn(`[excel] R2 get failed for ${objectKey}, using fallback:`, e.message || e);
+    }
+  }
+  if (memoryStore.has(objectKey)) {
+    const buf = memoryStore.get(objectKey);
+    return XLSX.read(buf, { type: "array", cellDates: true });
+  }
+  // If workbook doesn't exist yet in R2 or memory, initialize from base template
+  return getTemplateWorkbook();
+}
+
+async function saveWorkbook(bucket, wb, objectKey = DEFAULT_OBJECT_KEY) {
   const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
-  await bucket.put(OBJECT_KEY, buf, {
-    httpMetadata: {
-      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    },
-  });
+  memoryStore.set(objectKey, new Uint8Array(buf));
+  if (bucket && typeof bucket.put === "function") {
+    try {
+      await bucket.put(objectKey, buf, {
+        httpMetadata: {
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+      });
+    } catch (e) {
+      console.warn(`[excel] R2 put failed for ${objectKey}, saved to memory store:`, e.message || e);
+    }
+  }
 }
 
 function sheetDims(ws) {
@@ -84,22 +110,8 @@ function excelDateSerial(value) {
   return utc / 86400000 + 25569;
 }
 
-export async function appendRows(bucket, rows) {
-  const wb = await loadWorkbook(bucket);
-  const ws = wb.Sheets[SHEET_NAME];
-  if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found`);
-
-  let range = sheetDims(ws);
-  const rawHeaders = headerMap(ws, range);
-
-  // Find the next empty row (mirrors the "walk back while row is empty" guard
-  // in the original, since XLSX's declared range can overshoot actual data).
-  let nextRow0 = range.e.r + 1; // 0-based row to write into
-  while (nextRow0 > 1) {
-    if (rowHasValue(ws, nextRow0 - 1, range)) break;
-    nextRow0 -= 1;
-  }
-
+function writeRowsToSheet(ws, rawHeaders, rows, startRow0 = 1) {
+  let nextRow0 = startRow0;
   let written = 0;
   for (const rowData of rows) {
     for (const [key, header] of Object.entries(COLUMN_MAP)) {
@@ -125,38 +137,65 @@ export async function appendRows(bucket, rows) {
     nextRow0 += 1;
     written += 1;
   }
+  return { nextRow0, written };
+}
+
+export async function appendRows(bucket, rows, objectKey = DEFAULT_OBJECT_KEY) {
+  const wb = await loadWorkbook(bucket, objectKey);
+  const ws = wb.Sheets[SHEET_NAME];
+  if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found`);
+
+  let range = sheetDims(ws);
+  const rawHeaders = headerMap(ws, range);
+
+  // Find the next empty row (mirrors the "walk back while row is empty" guard)
+  let nextRow0 = range.e.r + 1;
+  while (nextRow0 > 1) {
+    if (rowHasValue(ws, nextRow0 - 1, range)) break;
+    nextRow0 -= 1;
+  }
+
+  const { nextRow0: updatedRow0, written } = writeRowsToSheet(ws, rawHeaders, rows, nextRow0);
+
+  range.e.r = Math.max(range.e.r, updatedRow0 - 1);
+  ws["!ref"] = XLSX.utils.encode_range(range);
+
+  await saveWorkbook(bucket, wb, objectKey);
+  return { appended: written };
+}
+
+// Replaces all existing data rows with the new batch, starting from row 2
+export async function replaceRows(bucket, rows, objectKey = DEFAULT_OBJECT_KEY) {
+  const wb = getTemplateWorkbook(); // Start from clean template
+  const ws = wb.Sheets[SHEET_NAME];
+  if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found`);
+
+  let range = sheetDims(ws);
+  const rawHeaders = headerMap(ws, range);
+
+  const { nextRow0, written } = writeRowsToSheet(ws, rawHeaders, rows, 1);
 
   range.e.r = Math.max(range.e.r, nextRow0 - 1);
   ws["!ref"] = XLSX.utils.encode_range(range);
 
-  await saveWorkbook(bucket, wb);
-  return { appended: written };
+  await saveWorkbook(bucket, wb, objectKey);
+  return { written, replaced: true };
 }
 
-export async function clearSheet(bucket) {
-  const wb = await loadWorkbook(bucket);
-  const ws = wb.Sheets[SHEET_NAME];
-  if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found`);
-
-  const range = sheetDims(ws);
-  let deleted = 0;
-  for (let r = range.e.r; r >= 1; r--) {
-    if (rowHasValue(ws, r, range)) {
-      for (let c = range.s.c; c <= range.e.c; c++) {
-        delete ws[XLSX.utils.encode_cell({ r, c })];
-      }
-      deleted += 1;
+export async function clearSheet(bucket, objectKey = DEFAULT_OBJECT_KEY) {
+  memoryStore.delete(objectKey);
+  if (bucket && typeof bucket.delete === "function") {
+    try {
+      await bucket.delete(objectKey);
+    } catch (e) {
+      console.warn(`[excel] R2 delete failed for ${objectKey}:`, e.message || e);
     }
   }
-  range.e.r = 0;
-  ws["!ref"] = XLSX.utils.encode_range(range);
-
-  await saveWorkbook(bucket, wb);
-  return { deleted };
+  return { deleted: true, status: "cleared" };
 }
 
-export async function getSheetPreview(bucket, maxRows = 50) {
-  const wb = await loadWorkbook(bucket);
+export async function getSheetPreview(bucket, maxRows = 50, objectKey = DEFAULT_OBJECT_KEY) {
+  const wb = await loadWorkbook(bucket, objectKey);
   const ws = wb.Sheets[SHEET_NAME];
   if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found`);
 
@@ -183,8 +222,20 @@ export async function getSheetPreview(bucket, maxRows = 50) {
   return { headers, rows: dataRows, total_rows: dataRows.length };
 }
 
-export async function getWorkbookBytes(bucket) {
-  const obj = await bucket.get(OBJECT_KEY);
-  if (!obj) return null;
-  return obj.arrayBuffer();
+export async function getWorkbookBytes(bucket, objectKey = DEFAULT_OBJECT_KEY) {
+  if (bucket && typeof bucket.get === "function") {
+    try {
+      const obj = await bucket.get(objectKey);
+      if (obj) {
+        return obj.arrayBuffer();
+      }
+    } catch (e) {
+      console.warn(`[excel] R2 get failed in getWorkbookBytes for ${objectKey}:`, e.message || e);
+    }
+  }
+  if (memoryStore.has(objectKey)) {
+    return memoryStore.get(objectKey).buffer;
+  }
+  // If not found in R2 or memory, return the clean template bytes
+  return getTemplateBytes();
 }

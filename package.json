@@ -2,8 +2,18 @@
   "name": "blinkit-po-backend",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "npm --prefix frontend run build",
+    "test": "node --test functions/api/_lib/*.test.js",
+    "deploy": "npm run build && wrangler pages deploy frontend/dist --project-name blinkit-po-tracker",
+    "dev": "wrangler pages dev frontend/dist --r2 EXCEL_BUCKET=blinkit-po-tracker"
+  },
   "dependencies": {
+    "jszip": "^3.10.2",
     "pdfjs-dist": "^4.7.76",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "wrangler": "^4.150.0"
   }
 }
