@@ -24,6 +24,24 @@ export function cleanupSession() {
 
 import { downloadClientExcel } from "./utils/excelFallback";
 
+export async function syncRowsToServer(rows, { mode = "replace" } = {}) {
+  const sessionId = getSessionId();
+  try {
+    const res = await fetch(`${BASE}/sync?sessionId=${encodeURIComponent(sessionId)}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-ID": sessionId,
+      },
+      body: JSON.stringify({ rows, mode }),
+    });
+    return await res.json();
+  } catch (e) {
+    console.warn("Failed to sync rows to server:", e);
+    return { ok: false, error: e.message };
+  }
+}
+
 export async function uploadPDFs(files, { mode = "replace" } = {}) {
   const sessionId = getSessionId();
   const form = new FormData();

@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback } from "react";
 import UploadZone from "./components/UploadZone";
 import ConfirmModal from "./components/ConfirmModal";
 import PreviewTable from "./components/PreviewTable";
-import { uploadInBatches, clearSheet, fetchPreview, downloadExcel, cleanupSession } from "./api";
+import { syncRowsToServer, clearSheet, fetchPreview, downloadExcel, cleanupSession } from "./api";
 import { unpackFiles } from "./utils/zip";
+import { extractPoData } from "./utils/extractor";
 
 function Toast({ message, type, onClose }) {
   useEffect(() => {
@@ -100,36 +101,82 @@ export default function App() {
       processed: 0,
       total: files.length,
       currentBatch: 1,
-      totalBatches: Math.ceil(files.length / 4),
+      totalBatches: files.length,
     });
 
-    try {
-      const data = await uploadInBatches(files, {
-        batchSize: 4,
-        onProgress: (p) => {
-          setUploadProgress(p);
-          if (p.latestFiles) {
-            setResults((prev) => {
-              const updated = { ...prev };
-              for (const r of p.latestFiles) {
-                updated[r.file] = r;
-              }
-              return updated;
-            });
-          }
-        },
-      });
+    const newResults = { ...results };
+    const allExtractedRows = [];
+    let ok = 0;
+    let fail = 0;
 
-      const map = {};
-      for (const r of data.files) map[r.file] = r;
-      setResults(map);
-      const ok = data.files.filter((r) => r.status === "ok").length;
-      const fail = data.files.filter((r) => r.status === "error").length;
-      if (ok) addToast(`${ok} PO${ok !== 1 ? "s" : ""} processed into fresh tracker.`, "success");
-      if (fail) addToast(`${fail} file${fail !== 1 ? "s" : ""} failed to parse.`, "error");
-      await loadPreview();
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setUploadProgress({
+          processed: i + 1,
+          total: files.length,
+          currentBatch: i + 1,
+          totalBatches: files.length,
+        });
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(arrayBuffer);
+          const rows = await extractPoData(bytes);
+          allExtractedRows.push(...rows);
+          newResults[file.name] = {
+            file: file.name,
+            status: "ok",
+            rows_extracted: rows.length,
+            po_number: rows[0]?.["PO NO"] ?? null,
+            po_date: rows[0]?.["PO DATE"] ?? null,
+            po_expiry_date: rows[0]?.["DELIVERY DATE"] ?? null,
+            vendor: rows[0]?.["VENDOR NAME"] ?? null,
+            raw_rows: rows,
+            items: rows.map((r) => ({
+              description: r["ARTICLE DESCRIPTION"],
+              qty: r["TOTAL PCS"],
+              landing_price: r["LANDING PRICE"],
+              total: r["TOTAL BASIC PO VALUE WITH TAX"],
+            })),
+          };
+          ok++;
+        } catch (e) {
+          console.error(`Error parsing ${file.name}:`, e);
+          newResults[file.name] = {
+            file: file.name,
+            status: "error",
+            message: e.message || String(e),
+          };
+          fail++;
+        }
+        setResults({ ...newResults });
+      }
+
+      if (ok > 0) {
+        addToast(`${ok} PO${ok !== 1 ? "s" : ""} processed successfully.`, "success");
+        // Sync extracted rows to server session (clean, lightweight JSON with zero PDF overhead)
+        syncRowsToServer(allExtractedRows, { mode: "replace" }).catch(() => {});
+
+        // Build live preview locally immediately
+        const previewHeaders = [
+          "CHAINS", "SITE CODE ", "VENDOR CODE", "VENDOR NAME", "PO NO",
+          "PO DATE", "DELIVERY DATE", "ARTICLE DESCRIPTION", "TOTAL PCS",
+          "LANDING PRICE", "TOTAL BASIC PO VALUE WITH TAX"
+        ];
+        const previewRows = allExtractedRows.slice(0, 50).map((r) => [
+          r["CHAINS"], r["SITE CODE"], r["VENDOR CODE"], r["VENDOR NAME"],
+          r["PO NO"], r["PO DATE"], r["DELIVERY DATE"], r["ARTICLE DESCRIPTION"],
+          r["TOTAL PCS"], r["LANDING PRICE"], r["TOTAL BASIC PO VALUE WITH TAX"]
+        ]);
+        setPreview({ headers: previewHeaders, rows: previewRows, total_rows: allExtractedRows.length });
+      }
+
+      if (fail > 0) {
+        addToast(`${fail} file${fail !== 1 ? "s" : ""} failed to parse.`, "error");
+      }
     } catch (e) {
-      addToast(`Upload error: ${e.message}`, "error");
+      addToast(`Processing error: ${e.message}`, "error");
     } finally {
       setUploading(false);
       setUploadProgress(null);

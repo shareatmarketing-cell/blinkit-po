@@ -1,0 +1,406 @@
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+const LEFT_RIGHT_SPLIT_X = 250;
+const ROW_GROUP_GAP = 12;
+const COL_MATCH_TOLERANCE = 12;
+
+export function parseDate(raw) {
+  if (!raw) return null;
+  const s = String(raw).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+
+  const months = {
+    jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+    may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7,
+    sep: 8, sept: 8, september: 8,
+    oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
+  };
+
+  const textDate = s.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(\d{4})\b/i);
+  let year;
+  let month;
+  let day;
+  if (textDate) {
+    month = months[textDate[1].toLowerCase()];
+    if (month === undefined) return null;
+    day = parseInt(textDate[2], 10);
+    year = parseInt(textDate[3], 10);
+  } else {
+    const ymd = s.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+    const dmy = s.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+    if (ymd) {
+      year = parseInt(ymd[1], 10);
+      month = parseInt(ymd[2], 10) - 1;
+      day = parseInt(ymd[3], 10);
+    } else if (dmy) {
+      day = parseInt(dmy[1], 10);
+      month = parseInt(dmy[2], 10) - 1;
+      year = parseInt(dmy[3], 10);
+    } else {
+      return null;
+    }
+  }
+
+  const d = new Date(Date.UTC(year, month, day));
+  if (
+    Number.isNaN(d.getTime()) ||
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month ||
+    d.getUTCDate() !== day
+  ) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function clean(val) {
+  if (val === null || val === undefined) return "";
+  let s = String(val);
+  s = s.replace(/([A-Za-z(])\n([a-z])/g, "$1$2");
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
+function num(val, cast = "float") {
+  if (val === null || val === undefined) return null;
+  const s = String(val).replace(/[\s,]/g, "");
+  if (s === "") return null;
+  const n = cast === "int" ? parseInt(s, 10) : parseFloat(s);
+  return Number.isNaN(n) ? null : n;
+}
+
+function headerKey(str) {
+  if (!str) return "";
+  return str.replace(/[^A-Za-z0-9%]/g, "").toLowerCase();
+}
+
+function findCol(columns, ...substrings) {
+  for (const col of columns) {
+    if (substrings.every((sub) => col.key.includes(sub))) return col;
+  }
+  return null;
+}
+
+function groupLines(items) {
+  const byY = new Map();
+  for (const it of items) {
+    if (!it.str || !it.str.trim()) continue;
+    const y = Math.round(it.y);
+    let bucket = null;
+    for (const key of byY.keys()) {
+      if (Math.abs(key - y) <= 2) { bucket = key; break; }
+    }
+    if (bucket === null) bucket = y;
+    if (!byY.has(bucket)) byY.set(bucket, []);
+    byY.get(bucket).push(it);
+  }
+  const lines = [...byY.entries()].map(([y, runs]) => ({
+    y,
+    runs: runs.sort((a, b) => a.x - b.x),
+  }));
+  lines.sort((a, b) => b.y - a.y);
+  return lines;
+}
+
+function lineText(runs) {
+  return runs.map((r) => r.str).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function extractMetadata(items) {
+  const lines = groupLines(items);
+  const meta = {
+    siteCode: "",
+    vendorName: "",
+    vendorCode: null,
+    poNumber: null,
+    poDate: null,
+    poExpiryDate: null,
+  };
+
+  for (const { runs } of lines) {
+    const left = runs.filter((r) => r.x < LEFT_RIGHT_SPLIT_X);
+    const right = runs.filter((r) => r.x >= LEFT_RIGHT_SPLIT_X);
+
+    for (const band of [left, right]) {
+      if (!band.length) continue;
+      const text = lineText(band);
+
+      if (/ZHPL/i.test(text)) {
+        const m = text.match(/ZHPL\s*[-–]\s*(.+)/i);
+        if (m) meta.siteCode = clean(m[1]);
+        continue;
+      }
+
+      const colonIdx = text.indexOf(":");
+      if (colonIdx === -1) continue;
+      const label = text.slice(0, colonIdx).trim();
+      const value = text.slice(colonIdx + 1).trim();
+      if (!label || !value) continue;
+      const labelLc = label.toLowerCase();
+
+      if (labelLc === "vendor") {
+        meta.vendorName = clean(value);
+      } else if (labelLc.includes("vendor no")) {
+        const n = num(value, "int");
+        meta.vendorCode = n === null ? value : n;
+      } else if (labelLc.includes("p.o. number") || labelLc.includes("po number")) {
+        const n = num(value, "int");
+        meta.poNumber = n === null ? value : n;
+      } else if (labelLc === "date") {
+        meta.poDate = parseDate(value);
+      } else if (labelLc.includes("po expiry")) {
+        meta.poExpiryDate = parseDate(value);
+      }
+    }
+  }
+
+  return meta;
+}
+
+function findColumns(items) {
+  const hashRun = items.find((it) => it.str.trim() === "#");
+  if (!hashRun) return null;
+  const headerTopY = Math.round(hashRun.y);
+  const col0X = hashRun.x;
+
+  const candidates = items
+    .filter((it) => Math.abs(it.x - col0X) <= COL_MATCH_TOLERANCE && /^\d+$/.test(it.str.trim()) && it.y < headerTopY - 2)
+    .sort((a, b) => b.y - a.y);
+  const row1Y = candidates.length ? Math.round(candidates[0].y) : headerTopY - 100;
+
+  const headerRuns = items.filter(
+    (it) => it.str.trim() && it.y <= headerTopY + 2 && it.y > row1Y + ROW_GROUP_GAP
+  );
+
+  const bands = [];
+  for (const run of headerRuns) {
+    let band = bands.find((b) => Math.abs(b.x - run.x) <= COL_MATCH_TOLERANCE);
+    if (!band) {
+      band = { x: run.x, runs: [] };
+      bands.push(band);
+    }
+    band.runs.push(run);
+  }
+  bands.sort((a, b) => a.x - b.x);
+
+  const columns = bands.map((b) => {
+    const text = b.runs
+      .sort((a, c) => c.y - a.y)
+      .map((r) => r.str)
+      .join(" ");
+    return { x: b.x, key: headerKey(text) };
+  });
+
+  return { columns, headerTopY, row1Y };
+}
+
+function assignColumn(columns, x) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const col of columns) {
+    const dist = Math.abs(col.x - x);
+    if (dist < bestDist) { bestDist = dist; best = col; }
+  }
+  return bestDist <= COL_MATCH_TOLERANCE * 2 ? best : null;
+}
+
+const FOOTER_MARKERS = [
+  /^Total Quantity/i,
+  /^Total Items/i,
+  /^Total weight/i,
+  /^Total Amount/i,
+  /^Terms\s*&\s*Conditions/i,
+  /^Other Conditions/i,
+  /^Prepared By/i,
+  /^Subject to the Jurisdiction/i,
+];
+
+function findFooterCutoffY(items) {
+  let cutoff = -Infinity;
+  for (const it of items) {
+    const text = it.str.trim();
+    if (FOOTER_MARKERS.some((re) => re.test(text))) {
+      cutoff = Math.max(cutoff, it.y);
+    }
+  }
+  return cutoff;
+}
+
+function extractSummary(pages) {
+  const text = pages
+    .flat()
+    .map((item) => item.str)
+    .join(" ")
+    .replace(/\s+/g, " ");
+  const quantity = text.match(/Total\s+Quantity\s*:\s*([\d,]+)/i);
+  const itemCount = text.match(/Total\s+Items\s*:\s*([\d,]+)/i);
+  const amount = text.match(/Total\s+Amount\s*:?\s*([\d,]+(?:\.\d+)?)/i);
+  if (!quantity || !itemCount || !amount) return null;
+  return {
+    quantity: num(quantity[1], "int"),
+    itemCount: num(itemCount[1], "int"),
+    amount: num(amount[1]),
+  };
+}
+
+function validateItems(items, summary) {
+  if (!items.length) throw new Error("Could not extract any PO item rows from PDF");
+  for (let index = 0; index < items.length; index++) {
+    const row = items[index];
+    const label = `PO item ${index + 1}`;
+    if (!row["ARTICLE DESCRIPTION"]) throw new Error(`${label} is missing its description`);
+    if (!Number.isFinite(row["TOTAL PCS"]) || row["TOTAL PCS"] <= 0) throw new Error(`${label} has an invalid quantity`);
+    if (!Number.isFinite(row["LANDING PRICE"]) || row["LANDING PRICE"] < 0) throw new Error(`${label} has an invalid landing price`);
+    if (!Number.isFinite(row["TOTAL BASIC PO VALUE WITH TAX"]) || row["TOTAL BASIC PO VALUE WITH TAX"] < 0) {
+      throw new Error(`${label} has an invalid total amount`);
+    }
+    const calculated = row["TOTAL PCS"] * row["LANDING PRICE"];
+    if (Math.abs(calculated - row["TOTAL BASIC PO VALUE WITH TAX"]) > 0.011) {
+      throw new Error(`${label} total does not match quantity multiplied by landing price`);
+    }
+  }
+
+  if (!summary) throw new Error("Could not extract PO summary totals for validation");
+  const quantity = items.reduce((sum, row) => sum + row["TOTAL PCS"], 0);
+  const amount = items.reduce((sum, row) => sum + row["TOTAL BASIC PO VALUE WITH TAX"], 0);
+  if (items.length !== summary.itemCount) throw new Error("Extracted item count does not match the PO summary");
+  if (quantity !== summary.quantity) throw new Error("Extracted quantity does not match the PO summary");
+  if (Math.abs(amount - summary.amount) > 0.011) throw new Error("Extracted amount does not match the PO summary");
+}
+
+function extractItemRows(items, columns, col0X, belowY) {
+  const footerY = findFooterCutoffY(items);
+  const tableItems = footerY === -Infinity ? items : items.filter((it) => it.y > footerY);
+
+  const rowAnchors = tableItems
+    .filter((it) => Math.abs(it.x - col0X) <= COL_MATCH_TOLERANCE && /^\d+$/.test(it.str.trim()) && it.y < belowY)
+    .sort((a, b) => b.y - a.y);
+
+  if (!rowAnchors.length) return [];
+
+  const rows = [];
+  for (let i = 0; i < rowAnchors.length; i++) {
+    const topY = rowAnchors[i].y;
+    const bottomY = i + 1 < rowAnchors.length ? rowAnchors[i + 1].y : footerY;
+    const rowItems = tableItems.filter((it) => it.y <= topY + 1 && it.y > bottomY + 2);
+
+    const byCol = new Map();
+    for (const it of rowItems) {
+      if (!it.str.trim()) continue;
+      const col = assignColumn(columns, it.x);
+      if (!col) continue;
+      if (!byCol.has(col.key)) byCol.set(col.key, []);
+      byCol.get(col.key).push(it);
+    }
+    const cellText = (key) => {
+      const runs = byCol.get(key);
+      if (!runs) return null;
+      return runs.sort((a, b) => b.y - a.y).map((r) => r.str).join("\n");
+    };
+    rows.push({ cellText });
+  }
+  return rows;
+}
+
+function makeRow(chain, siteCode, vendorCode, vendorName, poNumber, poDate, poExpiryDate, description, qty, landingPrice, totalAmt, extras) {
+  return {
+    "CHAINS": chain,
+    "SITE CODE": siteCode,
+    "VENDOR CODE": vendorCode,
+    "VENDOR NAME": vendorName,
+    "PO NO": poNumber,
+    "PO DATE": poDate,
+    "DELIVERY DATE": poExpiryDate,
+    "ARTICLE DESCRIPTION": description,
+    "TOTAL PCS": qty,
+    "LANDING PRICE": landingPrice,
+    "TOTAL BASIC PO VALUE WITH TAX": totalAmt,
+    ...(extras || {}),
+  };
+}
+
+export async function extractPoData(pdfBytes) {
+  const pdf = await pdfjsLib.getDocument({
+    data: pdfBytes,
+    isEvalSupported: false,
+    useSystemFonts: true,
+  }).promise;
+
+  const pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const items = content.items
+      .filter((it) => "str" in it)
+      .map((it) => ({
+        str: it.str,
+        x: it.transform[4],
+        y: it.transform[5],
+        width: it.width,
+      }));
+    pages.push(items);
+  }
+
+  if (!pages.length || !pages[0].length) {
+    throw new Error("No text found in PDF");
+  }
+
+  const chain = "Zomato Hyperpure Private Limited";
+  const meta = extractMetadata(pages[0]);
+
+  const missingDates = [];
+  if (!meta.poDate) missingDates.push("PO date");
+  if (!meta.poExpiryDate) missingDates.push("PO expiry date");
+  if (missingDates.length) {
+    throw new Error(`Could not extract required ${missingDates.join(" and ")} from PDF`);
+  }
+
+  const colInfo = findColumns(pages[0]);
+  if (!colInfo) {
+    throw new Error("Could not locate the PO item table");
+  }
+
+  const { columns, row1Y } = colInfo;
+  const hashRun = pages[0].find((it) => it.str.trim() === "#");
+  const col0X = hashRun.x;
+
+  const descCol = findCol(columns, "description");
+  const qtyCol = findCol(columns, "qty");
+  const landingCol = findCol(columns, "landing");
+  const totalCol = findCol(columns, "totalamt");
+  const hsnCol = findCol(columns, "hsncode");
+  const itemCodeCol = findCol(columns, "itemcode");
+  const basicCostCol = findCol(columns, "basiccostprice");
+  const mrpCol = columns.find((c) => c.key === "mrp");
+  const marginCol = findCol(columns, "margin");
+  const taxAmtCol = findCol(columns, "taxamt");
+
+  const allRows = [];
+  allRows.push(...extractItemRows(pages[0], columns, col0X, row1Y + ROW_GROUP_GAP));
+  for (let p = 1; p < pages.length; p++) {
+    allRows.push(...extractItemRows(pages[p], columns, col0X, Infinity));
+  }
+
+  const items = [];
+  for (const row of allRows) {
+    const description = clean(row.cellText(descCol?.key));
+    const qty = num(row.cellText(qtyCol?.key), "int");
+    const landing = num(row.cellText(landingCol?.key));
+    const total = num(row.cellText(totalCol?.key));
+
+    const extras = {
+      "HSN CODE": clean(row.cellText(hsnCol?.key)),
+      "ITEM CODE": clean(row.cellText(itemCodeCol?.key)),
+      "BASIC COST PRICE": num(row.cellText(basicCostCol?.key)),
+      "MRP": num(row.cellText(mrpCol?.key)),
+      "MARGIN %": num(row.cellText(marginCol?.key)),
+      "TAX AMT": num(row.cellText(taxAmtCol?.key)),
+    };
+
+    items.push(makeRow(chain, meta.siteCode, meta.vendorCode, meta.vendorName, meta.poNumber, meta.poDate, meta.poExpiryDate, description, qty, landing, total, extras));
+  }
+
+  validateItems(items, extractSummary(pages));
+
+  return items;
+}
